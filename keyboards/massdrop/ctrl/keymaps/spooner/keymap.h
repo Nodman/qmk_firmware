@@ -73,4 +73,5 @@ enum ctrl_keycodes {
     MD_BOOT,               // Restart into bootloader after hold timeout
     PROFILE,               // Switch between Main and Gaming profiles, saved in EEPROM
     HELP,                  // Type a one-line FN cheat sheet
+    STATUS_CLR,            // Clear all Raw HID status lights
 };

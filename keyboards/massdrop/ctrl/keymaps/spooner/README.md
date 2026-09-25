@@ -40,6 +40,7 @@ Hold Fn, or tap it twice to lock.
 | Fn+F1 / F2 | Play macro 1 / 2 (lost on unplug) |
 | Fn+N | NKRO on/off |
 | Fn+B (hold) | Bootloader |
+| Fn+Esc | Clear status lights (killed sessions stay gone, live ones return on next event) |
 | Fn+Pause | Reset EEPROM (all saved settings) |
 | Ctrl+Shift+Fn+U | Extra USB port: auto / always on |
 | Ctrl+Shift+Fn+I | LED current auto-limit on/off |

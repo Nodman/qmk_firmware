@@ -21,7 +21,7 @@ const uint16_t PROGMEM keymaps[][MATRIX_ROWS][MATRIX_COLS] = {
         _______, _______, KC_F14,                    _______,                              KC_F14,  _______, _______, _______,           _______, _______, _______ \
     ),
     [_FL] = LAYOUT(
-        _______, DM_PLY1, DM_PLY2, _______, _______, DM_REC1, DM_REC2, _______,  DM_RSTP,  _______, _______, _______, _______,           _______, _______, EE_CLR,
+        STATUS_CLR,DM_PLY1, DM_PLY2, _______, _______, DM_REC1, DM_REC2, _______,  DM_RSTP,  _______, _______, _______, _______,           _______, _______, EE_CLR,
         _______, KC_BRID, KC_BRIU, _______, _______, _______, _______, _______,  _______,  _______, _______, _______, _______,  _______, _______, _______, _______,
         RGB_M_P, RGB_SPD, RGB_VAI, RGB_SPI, RGB_HUI, RGB_SAI, _______, U_T_AUTO, U_T_AGCR, _______, PROFILE, _______, _______, _______, _______, _______, _______,
         _______, RGB_RMOD,RGB_VAD, RGB_MOD, RGB_HUD, RGB_SAD, HELP,    _______,  _______,  _______, _______, _______, _______,
@@ -55,7 +55,7 @@ const uint8_t PROGMEM ledmap[][DRIVER_LED_TOTAL][3] = {
         _______, _______, _______,                   _______,                            _______, _______, _______, _______,          _______, _______, _______
     },
     [_FL] = {
-        _______, CORAL,   CORAL,   _______, _______, CORAL,   CORAL,   _______, CORAL,   _______, _______, _______, _______,          _______, _______, RED,
+        CYAN,    CORAL,   CORAL,   _______, _______, CORAL,   CORAL,   _______, CORAL,   _______, _______, _______, _______,          _______, _______, RED,
         _______, PINK,    PINK,    _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______, _______,
         ORANGE,  ORANGE,  ORANGE,  ORANGE,  ORANGE,  ORANGE,  _______, RED,     RED,     _______, YELLOW,  _______, _______, _______, _______, _______, _______,
         _______, ORANGE,  ORANGE,  ORANGE,  ORANGE,  ORANGE,  WHITE,   _______, _______, _______, _______, _______, _______,
@@ -111,6 +111,8 @@ layer_state_t layer_state_set_user(layer_state_t state) {
     return state;
 }
 
+static void status_clear_all(void);
+
 bool process_record_user(uint16_t keycode, keyrecord_t *record) {
     static uint32_t key_timer;
 
@@ -155,7 +157,10 @@ bool process_record_user(uint16_t keycode, keyrecord_t *record) {
             case HELP:
                 SEND_STRING("Fn+ P:profile Z:lights(all/keys/under/off) D/A:effect next/prev Tab:solid "
                             "W/S:bright+/- R/F:hue+/- T/G:sat+/- E/Q:speed+/- 1/2:screen-/+ "
-                            "F5/F6:rec macro F8:stop F1/F2:play N:NKRO B(hold):boot Pause:reset EEPROM ");
+                            "F5/F6:rec macro F8:stop F1/F2:play N:NKRO B(hold):boot Esc:clear status Pause:reset EEPROM ");
+                return false;
+            case STATUS_CLR:
+                status_clear_all();
                 return false;
             case PROFILE:
                 set_single_persistent_default_layer(get_highest_layer(default_layer_state) == _GL ? _ML : _GL);
@@ -196,6 +201,13 @@ typedef struct {
 
 static status_led_t status_leds[DRIVER_LED_TOTAL];
 
+static void status_clear_all(void) {
+    for (uint8_t i = 0; i < DRIVER_LED_TOTAL; i++) {
+        status_leds[i].blank = status_leds[i].mode != STATUS_OFF;
+        status_leds[i].mode  = STATUS_OFF;
+    }
+}
+
 void raw_hid_receive(uint8_t *data, uint8_t length) {
     switch (data[0]) {
         case STATUS_CMD_SET: {
@@ -208,10 +220,7 @@ void raw_hid_receive(uint8_t *data, uint8_t length) {
             break;
         }
         case STATUS_CMD_CLEAR_ALL:
-            for (uint8_t i = 0; i < DRIVER_LED_TOTAL; i++) {
-                status_leds[i].blank = status_leds[i].mode != STATUS_OFF;
-                status_leds[i].mode  = STATUS_OFF;
-            }
+            status_clear_all();
             break;
     }
 }
