@@ -15,7 +15,7 @@ Based on the `endgame` keymap. QMK 0.18.6 (last QMK with CTRL v1 support is 0.26
   - Mac-style bottom row: Win key = Alt, Alt = Cmd, Right Alt = Right Cmd.
   - Top right: PrtSc, ScrLk, Mute.
   - Nav block: Ins/Home = prev/next track, PgUp/PgDn = volume, End = play/pause.
-- **Gaming**: Main with its own lighting.
+- **Gaming**: Main with its own lighting. Only mapped keys light up; the rest and underglow are off.
   - `~` = F13, both Cmd keys = F14.
   - Caps = plain Ctrl (no tap-hold delay).
 
@@ -25,6 +25,7 @@ Hold Fn, or tap it twice to lock.
 
 | Keys | Action |
 |---|---|
+| Fn+H | Type this cheat sheet as one line (host input must be English/US) |
 | Fn+P | Switch profile Main / Gaming |
 | Fn+Z | Lights: all → keys → underglow → off (saved) |
 | Fn+D / A | Next / previous effect |
@@ -47,3 +48,19 @@ Hold Fn, or tap it twice to lock.
 
 - Caps Word: tap both Shifts. The next word is typed in caps. Shift keys glow red while it is on.
 - Lights turn off when the computer sleeps (USB suspend).
+
+## Status lights (Raw HID)
+
+The Mac sets key colors over Raw HID. Shown in every light mode (Fn+Z off too), hidden while Fn is held. RAM only: lost on unplug, the next hook event restores them.
+
+- Tool: `host/ctrl-led.swift`. Build: `xcrun swiftc -O host/ctrl-led.swift -o ~/.local/bin/ctrl-led`
+- Manual: `ctrl-led set f1 orange blink`, `ctrl-led off f1`, `ctrl-led clear`
+- While any of F1–F9 has a status, the other F1–F9 keys go dark.
+
+### Claude Code sessions
+
+- Esc: summary. Red if any session needs you, else orange if any works, else green.
+- F1–F9: one key per session. Orange slow blink = working, red fast blink = question or permission, green = standby.
+- `ctrl-led claude list` shows which key is which session.
+- `ctrl-led claude reset` forgets all sessions.
+- Hooks in `~/.claude/settings.json`: `ctrl-led claude` (timeout 5) on SessionStart, SessionEnd, UserPromptSubmit, Stop, StopFailure, Notification, and with matcher `*` on PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, PermissionDenied.
