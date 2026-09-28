@@ -76,6 +76,8 @@ func parseColor(_ s: String) -> (UInt8, UInt8, UInt8)? {
 let summaryLED = 0
 let slotLEDs = Array(1...9)
 let staleSeconds = 24.0 * 3600
+// "working" with no events this long and no tool running shows as idle.
+let stuckWorkingSeconds = 10.0 * 60
 
 enum State: String, Codable { case idle, working, question }
 
@@ -91,6 +93,7 @@ struct Session: Codable {
     var pid: Int32
     var cwd: String
     var updated: Double
+    var toolRunning: Bool?
 }
 
 let stateDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/ctrl-led")
@@ -148,6 +151,46 @@ func claudePID() -> Int32 {
     return 0
 }
 
+func processArgs(_ pid: pid_t) -> [String] {
+    var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
+    var size = 0
+    guard sysctl(&mib, 3, nil, &size, nil, 0) == 0, size > 4 else { return [] }
+    var buf = [UInt8](repeating: 0, count: size)
+    guard sysctl(&mib, 3, &buf, &size, nil, 0) == 0 else { return [] }
+    // Layout: argc (Int32), exec path, NUL padding, then argc NUL-terminated args.
+    let argc = Int(buf.withUnsafeBytes { $0.load(as: Int32.self) })
+    var i = 4
+    while i < size && buf[i] != 0 { i += 1 }
+    while i < size && buf[i] == 0 { i += 1 }
+    var args: [String] = []
+    while args.count < argc && i < size {
+        let start = i
+        while i < size && buf[i] != 0 { i += 1 }
+        args.append(String(decoding: buf[start..<i], as: UTF8.self))
+        i += 1
+    }
+    return args
+}
+
+// Session this process resumed (`--resume <id or path/id.jsonl>`). A fork gets a new id,
+// and the old id never sends SessionEnd.
+func resumedSessionID(_ pid: pid_t) -> String? {
+    let args = processArgs(pid)
+    var value: String?
+    for (i, a) in args.enumerated() {
+        if (a == "--resume" || a == "-r"), i + 1 < args.count { value = args[i + 1] }
+        if a.hasPrefix("--resume=") { value = String(a.dropFirst("--resume=".count)) }
+    }
+    guard let value, !value.isEmpty else { return nil }
+    return ((value as NSString).lastPathComponent as NSString).deletingPathExtension
+}
+
+func shownState(_ s: Session) -> State {
+    let quiet = Date().timeIntervalSince1970 - s.updated
+    if s.state == .working && !(s.toolRunning ?? false) && quiet > stuckWorkingSeconds { return .idle }
+    return s.state
+}
+
 func isAlive(_ s: Session) -> Bool {
     if s.pid > 0 { return kill(s.pid, 0) == 0 || errno == EPERM }
     return Date().timeIntervalSince1970 - s.updated < staleSeconds
@@ -173,7 +216,7 @@ func newState(event: String, input: [String: Any], current: State) -> State? {
 func render(_ sessions: [String: Session]) {
     let devices = openKeyboards()
     guard !devices.isEmpty else { return }
-    let states = sessions.values.map(\.state)
+    let states = sessions.values.map(shownState)
     let summary: State? = states.contains(.question) ? .question : states.contains(.working) ? .working : states.isEmpty ? nil : .idle
     if let s = summary, let look = stateLooks[s] {
         setLED(devices, summaryLED, look.0, look.1)
@@ -181,7 +224,7 @@ func render(_ sessions: [String: Session]) {
         setLED(devices, summaryLED, colors["off"]!, .off)
     }
     for (i, led) in slotLEDs.enumerated() {
-        if let s = sessions.values.first(where: { $0.slot == i + 1 }), let look = stateLooks[s.state] {
+        if let s = sessions.values.first(where: { $0.slot == i + 1 }), let look = stateLooks[shownState(s)] {
             setLED(devices, led, look.0, look.1)
         } else {
             setLED(devices, led, colors["off"]!, .off)
@@ -210,6 +253,10 @@ func claudeHook() {
             log("\(id.prefix(8)) \(event) \(before) -> removed")
         } else {
             var s = sessions[id] ?? Session(slot: nil, state: .idle, pid: claudePID(), cwd: input["cwd"] as? String ?? "", updated: 0)
+            if s.pid > 0, let old = resumedSessionID(s.pid), old != id, let ghost = sessions[old] {
+                log("\(old.prefix(8)) replaced by fork \(id.prefix(8)), freed key \(ghost.slot.map(slotKeyName) ?? "-")")
+                sessions[old] = nil
+            }
             if s.slot == nil {
                 let used = Set(sessions.values.compactMap(\.slot))
                 s.slot = (1...slotLEDs.count).first { !used.contains($0) }
@@ -218,6 +265,11 @@ func claudeHook() {
                 }
             }
             if let state = newState(event: event, input: input, current: s.state) { s.state = state }
+            if event == "PreToolUse" {
+                s.toolRunning = true
+            } else if ["PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "StopFailure"].contains(event) {
+                s.toolRunning = false
+            }
             s.updated = Date().timeIntervalSince1970
             sessions[id] = s
             log("\(id.prefix(8)) \(event) \(tool) \(before) -> \(s.state.rawValue) key \(s.slot.map(slotKeyName) ?? "-") pid \(s.pid)")
@@ -233,8 +285,13 @@ func claudeList() {
     withLockedSessions { sessions in
         sessions = sessions.filter { isAlive($0.value) }
         if sessions.isEmpty { print("No Claude sessions.") }
-        for s in sessions.values.sorted(by: { ($0.slot ?? 99) < ($1.slot ?? 99) }) {
-            print("key \(s.slot.map(slotKeyName) ?? "-")  \(s.state.rawValue.padding(toLength: 8, withPad: " ", startingAt: 0))  \(s.cwd)")
+        let now = Date().timeIntervalSince1970
+        for (id, s) in sessions.sorted(by: { ($0.value.slot ?? 99) < ($1.value.slot ?? 99) }) {
+            let shown = shownState(s) == s.state ? s.state.rawValue : "\(shownState(s).rawValue)*"
+            print("key \(s.slot.map(slotKeyName) ?? "-")  \(shown.padding(toLength: 9, withPad: " ", startingAt: 0))  \(id.prefix(8))  pid \(s.pid)  \(Int(now - s.updated))s ago  \(s.cwd)")
+        }
+        if sessions.values.contains(where: { shownState($0) != $0.state }) {
+            print("* working with no events for \(Int(stuckWorkingSeconds / 60)) min, shown as idle")
         }
         render(sessions)
     }
