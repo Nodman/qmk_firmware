@@ -174,6 +174,38 @@ func processArgs(_ pid: pid_t) -> [String] {
     return args
 }
 
+typealias TmuxLocation = (socket: String, pane: String)
+
+func tmuxLocationFromEnv() -> TmuxLocation? {
+    let env = ProcessInfo.processInfo.environment
+    guard let tmux = env["TMUX"], let pane = env["TMUX_PANE"], let socket = tmux.split(separator: ",").first else { return nil }
+    return (String(socket), pane)
+}
+
+// Daemon-hosted sessions have no TMUX env (macOS hides other processes' env), so find the
+// nearest ancestor that is some tmux pane's process, across all tmux servers of this user.
+func tmuxLocationFromAncestors() -> TmuxLocation? {
+    let base = ProcessInfo.processInfo.environment["TMUX_TMPDIR"] ?? "/private/tmp"
+    let dir = "\(base)/tmux-\(getuid())"
+    var panes: [pid_t: TmuxLocation] = [:]
+    for name in (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? [] {
+        let socket = "\(dir)/\(name)"
+        let out = run(["tmux", "-S", socket, "list-panes", "-a", "-F", "#{pane_pid} #{pane_id}"])
+        guard out.status == 0 else { continue }
+        for line in out.output.split(separator: "\n") {
+            let parts = line.split(separator: " ")
+            if parts.count == 2, let pid = pid_t(parts[0]) { panes[pid] = (socket, String(parts[1])) }
+        }
+    }
+    var pid = getppid()
+    for _ in 0..<20 {
+        if let loc = panes[pid] { return loc }
+        guard let parent = parentPID(pid), parent > 1 else { break }
+        pid = parent
+    }
+    return nil
+}
+
 // Session this process resumed (`--resume <id or path/id.jsonl>`). A fork gets a new id,
 // and the old id never sends SessionEnd.
 func resumedSessionID(_ pid: pid_t) -> String? {
@@ -267,10 +299,9 @@ func claudeHook() {
                 }
             }
             if let state = newState(event: event, input: input, current: s.state) { s.state = state }
-            let env = ProcessInfo.processInfo.environment
-            if let tmux = env["TMUX"], let pane = env["TMUX_PANE"] {
-                s.tmuxSocket = tmux.split(separator: ",").first.map(String.init)
-                s.tmuxPane = pane
+            if let loc = tmuxLocationFromEnv() ?? (s.tmuxPane == nil ? tmuxLocationFromAncestors() : nil) {
+                s.tmuxSocket = loc.socket
+                s.tmuxPane = loc.pane
             }
             if event == "PreToolUse" {
                 s.toolRunning = true
