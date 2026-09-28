@@ -338,12 +338,13 @@ func claudeList() {
 // MARK: - tmux focus
 
 @discardableResult
-func run(_ args: [String]) -> (status: Int32, output: String) {
+func run(_ args: [String], env extra: [String: String] = [:]) -> (status: Int32, output: String) {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
     p.arguments = args
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/Applications/WezTerm.app/Contents/MacOS:" + (env["PATH"] ?? "/usr/bin:/bin")
+    env.merge(extra) { $1 }
     p.environment = env
     let out = Pipe()
     p.standardOutput = out
@@ -352,6 +353,23 @@ func run(_ args: [String]) -> (status: Int32, output: String) {
     let data = out.fileHandleForReading.readDataToEndOfFile()
     p.waitUntilExit()
     return (p.terminationStatus, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+// Socket of the running WezTerm GUI. WEZTERM_UNIX_SOCKET inherited through tmux goes
+// stale when WezTerm restarts while the tmux server keeps running.
+func weztermSocket() -> String? {
+    let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/share/wezterm")
+    let live = ((try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [])
+        .filter { url in
+            guard url.lastPathComponent.hasPrefix("gui-sock-"), let pid = pid_t(url.lastPathComponent.dropFirst("gui-sock-".count)) else { return false }
+            return kill(pid, 0) == 0
+        }
+    let newest = live.max { a, b in
+        let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+        return da < db
+    }
+    return newest?.path
 }
 
 // Called from a tmux binding: switch the client that pressed it to the agent's pane.
@@ -386,8 +404,14 @@ func claudeFocus(target: String, client: String, socket: String, currentPane: St
 
     if paneSocket == socket {
         run(["tmux", "-S", socket, "switch-client", "-c", client, "-t", found.output])
-    } else if run(["wezterm", "cli", "spawn", "--new-window", "--", "tmux", "-S", paneSocket, "attach", "-t", found.output]).status != 0 {
-        say("\(key) is on another tmux server: tmux -S \(paneSocket) attach")
+    } else {
+        // Full tmux path: the new window may not have Homebrew on PATH.
+        let tmux = run(["sh", "-c", "command -v tmux"]).output
+        let spawn = ["wezterm", "cli", "spawn", "--new-window", "--", tmux.isEmpty ? "tmux" : tmux, "-S", paneSocket, "attach", "-t", found.output]
+        let env = weztermSocket().map { ["WEZTERM_UNIX_SOCKET": $0] } ?? [:]
+        if run(spawn, env: env).status != 0 {
+            say("\(key) is on tmux server \((paneSocket as NSString).lastPathComponent); WezTerm window failed. Attach: tmux -S \(paneSocket) attach")
+        }
     }
 }
 
