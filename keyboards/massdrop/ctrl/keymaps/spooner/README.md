@@ -64,4 +64,5 @@ The Mac sets key colors over Raw HID. Shown in every light mode (Fn+Z off too), 
 - F1–F9: one key per session. Orange slow blink = working, red fast blink = question or permission, green = standby.
 - `ctrl-led claude list` shows which key is which session.
 - `ctrl-led claude reset` forgets all sessions.
+- `ctrl-led claude focus <1-9|next> <client> <socket> <pane>` switches a tmux client to that agent's pane (bound to `prefix F1`–`F9` / `prefix Esc` in the dotfiles `.tmux.conf`).
 - Hooks in `~/.claude/settings.json`: `ctrl-led claude` (timeout 5) on SessionStart, SessionEnd, UserPromptSubmit, Stop, StopFailure, Notification, and with matcher `*` on PreToolUse, PostToolUse, PostToolUseFailure, PermissionRequest, PermissionDenied.

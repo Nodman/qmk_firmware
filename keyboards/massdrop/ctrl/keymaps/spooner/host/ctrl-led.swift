@@ -94,6 +94,8 @@ struct Session: Codable {
     var cwd: String
     var updated: Double
     var toolRunning: Bool?
+    var tmuxSocket: String?
+    var tmuxPane: String?
 }
 
 let stateDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/ctrl-led")
@@ -265,6 +267,11 @@ func claudeHook() {
                 }
             }
             if let state = newState(event: event, input: input, current: s.state) { s.state = state }
+            let env = ProcessInfo.processInfo.environment
+            if let tmux = env["TMUX"], let pane = env["TMUX_PANE"] {
+                s.tmuxSocket = tmux.split(separator: ",").first.map(String.init)
+                s.tmuxPane = pane
+            }
             if event == "PreToolUse" {
                 s.toolRunning = true
             } else if ["PostToolUse", "PostToolUseFailure", "PermissionDenied", "UserPromptSubmit", "Stop", "StopFailure"].contains(event) {
@@ -288,12 +295,68 @@ func claudeList() {
         let now = Date().timeIntervalSince1970
         for (id, s) in sessions.sorted(by: { ($0.value.slot ?? 99) < ($1.value.slot ?? 99) }) {
             let shown = shownState(s) == s.state ? s.state.rawValue : "\(shownState(s).rawValue)*"
-            print("key \(s.slot.map(slotKeyName) ?? "-")  \(shown.padding(toLength: 9, withPad: " ", startingAt: 0))  \(id.prefix(8))  pid \(s.pid)  \(Int(now - s.updated))s ago  \(s.cwd)")
+            print("key \(s.slot.map(slotKeyName) ?? "-")  \(shown.padding(toLength: 9, withPad: " ", startingAt: 0))  \(id.prefix(8))  pid \(s.pid)  pane \(s.tmuxPane ?? "-")  \(Int(now - s.updated))s ago  \(s.cwd)")
         }
         if sessions.values.contains(where: { shownState($0) != $0.state }) {
             print("* working with no events for \(Int(stuckWorkingSeconds / 60)) min, shown as idle")
         }
         render(sessions)
+    }
+}
+
+// MARK: - tmux focus
+
+@discardableResult
+func run(_ args: [String]) -> (status: Int32, output: String) {
+    let p = Process()
+    p.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    p.arguments = args
+    var env = ProcessInfo.processInfo.environment
+    env["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/Applications/WezTerm.app/Contents/MacOS:" + (env["PATH"] ?? "/usr/bin:/bin")
+    p.environment = env
+    let out = Pipe()
+    p.standardOutput = out
+    p.standardError = FileHandle.nullDevice
+    guard (try? p.run()) != nil else { return (-1, "") }
+    let data = out.fileHandleForReading.readDataToEndOfFile()
+    p.waitUntilExit()
+    return (p.terminationStatus, String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines))
+}
+
+// Called from a tmux binding: switch the client that pressed it to the agent's pane.
+// target: slot number (1-9) or "next" (question first, then latest finished, then working).
+func claudeFocus(target: String, client: String, socket: String, currentPane: String) {
+    func say(_ text: String) { run(["tmux", "-S", socket, "display-message", "-c", client, text]) }
+
+    var sessions: [String: Session] = [:]
+    withLockedSessions { all in
+        all = all.filter { isAlive($0.value) }
+        sessions = all
+    }
+    let session: Session?
+    if target == "next" {
+        let rank: [State: Int] = [.question: 0, .idle: 1, .working: 2]
+        session = sessions.values
+            .filter { $0.tmuxPane != nil && $0.tmuxPane != currentPane }
+            .min { (rank[shownState($0)]!, -$0.updated) < (rank[shownState($1)]!, -$1.updated) }
+        if session == nil { return say("No other agent to jump to") }
+    } else {
+        guard let slot = Int(target) else { return say("ctrl-led: bad target \(target)") }
+        session = sessions.values.first { $0.slot == slot }
+        if session == nil { return say("\(slotKeyName(slot)): no agent") }
+    }
+    guard let s = session, let pane = s.tmuxPane, let paneSocket = s.tmuxSocket else {
+        return say("\(session?.slot.map(slotKeyName) ?? "Agent"): not in tmux")
+    }
+    let key = s.slot.map(slotKeyName) ?? "Agent"
+    let found = run(["tmux", "-S", paneSocket, "display-message", "-p", "-t", pane, "#{session_id}"])
+    guard found.status == 0, !found.output.isEmpty else { return say("\(key): pane \(pane) is closed") }
+    run(["tmux", "-S", paneSocket, "select-window", "-t", pane, ";", "select-pane", "-t", pane])
+
+    if paneSocket == socket {
+        run(["tmux", "-S", socket, "switch-client", "-c", client, "-t", found.output])
+    } else if run(["wezterm", "cli", "spawn", "--new-window", "--", "tmux", "-S", paneSocket, "attach", "-t", found.output]).status != 0 {
+        say("\(key) is on another tmux server: tmux -S \(paneSocket) attach")
     }
 }
 
@@ -307,6 +370,7 @@ Usage:
   ctrl-led claude                                 Claude Code hook: reads hook JSON on stdin
   ctrl-led claude list                            show sessions and their keys, refresh lights
   ctrl-led claude reset                           forget all sessions, turn off lights
+  ctrl-led claude focus <1-9|next> <client> <socket> <pane>   jump to agent (from a tmux binding)
   Event log: ~/.local/state/ctrl-led/events.log
 """
 
@@ -336,6 +400,10 @@ case "claude":
     switch args.dropFirst().first {
     case nil: claudeHook()
     case "list": claudeList()
+    case "focus":
+        let a = Array(args.dropFirst(2))
+        guard a.count >= 4 else { fail(usageText) }
+        claudeFocus(target: a[0], client: a[1], socket: a[2], currentPane: a[3])
     case "reset":
         withLockedSessions { sessions in
             sessions = [:]
