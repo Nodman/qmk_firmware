@@ -95,6 +95,20 @@ struct Session: Codable {
 
 let stateDir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/state/ctrl-led")
 let stateFile = stateDir.appendingPathComponent("claude.json")
+let logFile = stateDir.appendingPathComponent("events.log")
+let logMaxBytes = 512 * 1024
+
+// Append one line; keep the newest half when the file gets too big. Call under the lock.
+func log(_ line: String) {
+    let stamp = ISO8601DateFormatter.string(from: Date(), timeZone: .current, formatOptions: [.withInternetDateTime, .withFractionalSeconds])
+    var data = (try? Data(contentsOf: logFile)) ?? Data()
+    if data.count > logMaxBytes {
+        data = data.suffix(logMaxBytes / 2)
+        if let nl = data.firstIndex(of: 0x0A) { data = data.suffix(from: nl + 1) }
+    }
+    data.append("\(stamp) \(line)\n".data(using: .utf8)!)
+    try? data.write(to: logFile, options: .atomic)
+}
 
 func withLockedSessions(_ body: (inout [String: Session]) -> Void) {
     try? FileManager.default.createDirectory(at: stateDir, withIntermediateDirectories: true)
@@ -139,7 +153,7 @@ func isAlive(_ s: Session) -> Bool {
     return Date().timeIntervalSince1970 - s.updated < staleSeconds
 }
 
-func newState(event: String, input: [String: Any]) -> State? {
+func newState(event: String, input: [String: Any], current: State) -> State? {
     let tool = input["tool_name"] as? String ?? ""
     let kind = input["notification_type"] as? String ?? ""
     switch event {
@@ -148,7 +162,10 @@ func newState(event: String, input: [String: Any]) -> State? {
     case "PreToolUse": return tool == "AskUserQuestion" ? .question : .working
     case "PermissionRequest": return .question
     case "Notification":
-        return ["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"].contains(kind) ? .question : nil
+        if ["permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input"].contains(kind) { return .question }
+        // Stop does not fire on user interrupt; the idle prompt (~60 s later) ends a stuck "working".
+        if kind == "idle_prompt" && current == .working { return .idle }
+        return nil
     default: return nil
     }
 }
@@ -181,10 +198,16 @@ func claudeHook() {
           let id = input["session_id"] as? String,
           let event = input["hook_event_name"] as? String else { return }
     var message: String?
+    let tool = input["tool_name"] as? String ?? input["notification_type"] as? String ?? ""
     withLockedSessions { sessions in
-        sessions = sessions.filter { isAlive($0.value) }
+        for (deadID, s) in sessions where !isAlive(s) {
+            log("\(deadID.prefix(8)) pruned dead pid \(s.pid) slot \(s.slot.map(slotKeyName) ?? "-")")
+            sessions[deadID] = nil
+        }
+        let before = sessions[id]?.state.rawValue ?? "new"
         if event == "SessionEnd" {
             sessions[id] = nil
+            log("\(id.prefix(8)) \(event) \(before) -> removed")
         } else {
             var s = sessions[id] ?? Session(slot: nil, state: .idle, pid: claudePID(), cwd: input["cwd"] as? String ?? "", updated: 0)
             if s.slot == nil {
@@ -194,9 +217,10 @@ func claudeHook() {
                     message = s.slot.map { "Keyboard status key: \(slotKeyName($0))" } ?? "Keyboard status: all keys in use"
                 }
             }
-            if let state = newState(event: event, input: input) { s.state = state }
+            if let state = newState(event: event, input: input, current: s.state) { s.state = state }
             s.updated = Date().timeIntervalSince1970
             sessions[id] = s
+            log("\(id.prefix(8)) \(event) \(tool) \(before) -> \(s.state.rawValue) key \(s.slot.map(slotKeyName) ?? "-") pid \(s.pid)")
         }
         render(sessions)
     }
@@ -226,6 +250,7 @@ Usage:
   ctrl-led claude                                 Claude Code hook: reads hook JSON on stdin
   ctrl-led claude list                            show sessions and their keys, refresh lights
   ctrl-led claude reset                           forget all sessions, turn off lights
+  Event log: ~/.local/state/ctrl-led/events.log
 """
 
 func fail(_ msg: String) -> Never {
